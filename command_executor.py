@@ -1,11 +1,13 @@
 import subprocess
 import shlex
+import os # Import os for path joining if needed, though not strictly necessary here
 
 class RunCommandNode:
     """
     🚨 EXTREME SECURITY RISK 🚨
     This node executes arbitrary shell commands on the server running ComfyUI.
     Use with extreme caution and only in completely isolated, trusted environments.
+    Commands starting with '#' will be ignored.
     """
     @classmethod
     def INPUT_TYPES(s):
@@ -13,7 +15,7 @@ class RunCommandNode:
             "required": {
                 "command": ("STRING", {
                     "multiline": True, # Allows multi-line commands
-                    "default": "echo 'Hello from ComfyUI!'"
+                    "default": "# This is a comment and will be ignored\necho 'Hello from ComfyUI!'"
                 }),
             }
         }
@@ -24,6 +26,19 @@ class RunCommandNode:
     CATEGORY = "⚠️Utils/Execution (DANGEROUS)" # Clearly mark as dangerous
 
     def execute_command(self, command):
+        # --- Added Check for '#' ---
+        stripped_command = command.strip()
+        if not stripped_command: # Also ignore empty commands
+            message = "Command is empty, ignoring."
+            print(message)
+            return (message,)
+        if stripped_command.startswith('#'):
+            message = f"Command ignored (starts with #): {command}"
+            print(message)
+            # Return the message as output to indicate it was skipped
+            return (message,)
+        # --- End of Added Check ---
+
         print(f"Executing command: {command}")
         output_str = ""
         try:
