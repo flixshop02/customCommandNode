@@ -18,10 +18,6 @@ class RunCommandNode:
                     "multiline": True,
                     "default": "# This is a comment and will be ignored\necho 'Hello from ComfyUI!'"
                 }),
-                "env_vars": ("STRING", {
-                    "multiline": True,
-                    "default": "# KEY=VALUE format, one per line\n"
-                }),
                 "working_dir": ("STRING", {
                     "default": "",
                     "multiline": False,
@@ -55,18 +51,7 @@ class RunCommandNode:
     FUNCTION = "execute_command"
     CATEGORY = "⚠️Utils/Execution (DANGEROUS)"
 
-    def parse_env_vars(self, env_str):
-        env = {}
-        for line in env_str.splitlines():
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if '=' in line:
-                k, v = line.split('=', 1)
-                env[k.strip()] = v.strip()
-        return env
-
-    def execute_command(self, command, env_vars, working_dir, stop_on_error, timeout, truncate_output, structured_output):
+    def execute_command(self, command, working_dir, stop_on_error, timeout, truncate_output, structured_output):
         output_str = ""
         structured_results = []
         if not command or not command.strip():
@@ -77,7 +62,6 @@ class RunCommandNode:
         lines = command.splitlines()
         executed_any = False
         env = os.environ.copy()
-        env.update(self.parse_env_vars(env_vars))
         summary = []
         for idx, line in enumerate(lines, 1):
             stripped = line.strip()
