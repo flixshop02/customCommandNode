@@ -26,58 +26,47 @@ class RunCommandNode:
     CATEGORY = "⚠️Utils/Execution (DANGEROUS)" # Clearly mark as dangerous
 
     def execute_command(self, command):
-        # --- Added Check for '#' ---
-        stripped_command = command.strip()
-        if not stripped_command: # Also ignore empty commands
+        output_str = ""
+        if not command or not command.strip():
             message = "Command is empty, ignoring."
             print(message)
             return (message,)
-        if stripped_command.startswith('#'):
-            message = f"Command ignored (starts with #): {command}"
-            print(message)
-            # Return the message as output to indicate it was skipped
-            return (message,)
-        # --- End of Added Check ---
 
-        print(f"Executing command: {command}")
-        output_str = ""
-        try:
-            # Use shell=True cautiously. It's needed for complex commands with pipes, etc.
-            # but increases security risks as the shell interprets the command string.
-            # For simpler commands, consider shell=False and splitting the command using shlex.split(command)
-            result = subprocess.run(
-                command,
-                shell=True,
-                check=False, # Don't raise exception on non-zero exit code, capture it instead
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True, # Capture output as text
-                executable='/bin/bash' # Explicitly use bash on Linux
-            )
+        lines = command.splitlines()
+        executed_any = False
 
-            if result.stdout:
-                output_str += f"--- STDOUT ---\n{result.stdout}\n"
-                print(f"Command STDOUT:\n{result.stdout}")
+        for idx, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                output_str += f"[Line {idx}] Skipped: {line}\n"
+                continue
 
-            if result.stderr:
-                output_str += f"--- STDERR ---\n{result.stderr}\n"
-                print(f"Command STDERR:\n{result.stderr}")
+            executed_any = True
+            output_str += f"\n[Line {idx}] Executing: {stripped}\n"
+            print(f"Executing line {idx}: {stripped}")
+            try:
+                result = subprocess.run(
+                    stripped,
+                    shell=True,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    executable='/bin/bash'
+                )
+                if result.stdout:
+                    output_str += f"--- STDOUT ---\n{result.stdout}"
+                if result.stderr:
+                    output_str += f"--- STDERR ---\n{result.stderr}"
+                output_str += f"--- Exit Code: {result.returncode} ---\n"
+            except Exception as e:
+                error_message = f"--- EXECUTION ERROR ---\nFailed to execute line {idx}: {e}\n"
+                print(error_message)
+                output_str += error_message
 
-            output_str += f"\n--- Exit Code: {result.returncode} ---"
-            print(f"Command exited with code: {result.returncode}")
+        if not executed_any:
+            output_str += "No commands executed (all lines empty or commented).\n"
 
-            # Optional: Raise an error in ComfyUI if the command failed
-            # if result.returncode != 0:
-            #     raise Exception(f"Command failed with exit code {result.returncode}:\n{result.stderr}")
-
-        except Exception as e:
-            error_message = f"Failed to execute command: {e}"
-            print(error_message)
-            output_str += f"\n--- EXECUTION ERROR ---\n{error_message}"
-            # Optionally re-raise the exception to halt the workflow
-            # raise e
-
-        # Return the combined output/error string
         return (output_str,)
 
 # Node class mappings for ComfyUI
