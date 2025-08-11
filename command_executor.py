@@ -1,6 +1,9 @@
 import subprocess
 import os
 import tempfile
+import time
+import json
+import shutil
 
 class RunCommandNode:
     """
@@ -47,6 +50,34 @@ class RunCommandNode:
                     "default": False,
                     "label": "Chain commands (run as one shell script)"
                 }),
+                # New QoL inputs
+                "shell": ("STRING", {
+                    "default": "auto",
+                    "choices": ["auto", "bash", "cmd", "powershell"],
+                    "label": "Shell"
+                }),
+                "dry_run": ("BOOLEAN", {
+                    "default": False
+                }),
+                "merge_stderr": ("BOOLEAN", {
+                    "default": False,
+                    "label": "Merge STDERR into STDOUT"
+                }),
+                "env_vars": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "placeholder": "KEY=VALUE (one per line)"
+                }),
+                "prepend_path": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "placeholder": "Paths to prepend to PATH (one per line)"
+                }),
+                "redact_patterns": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "placeholder": "Secrets to redact in output (one per line)"
+                }),
             }
         }
 
@@ -55,7 +86,8 @@ class RunCommandNode:
     FUNCTION = "execute_command"
     CATEGORY = "⚠️Utils/Execution (DANGEROUS)"
 
-    def execute_command(self, command, working_dir, stop_on_error, timeout, truncate_output, structured_output, chain_commands):
+    def execute_command(self, command, working_dir, stop_on_error, timeout, truncate_output, structured_output, chain_commands,
+                        shell, env_vars, prepend_path, dry_run, merge_stderr, redact_patterns):
         output_str = ""
         structured_results = []
         if not command or not command.strip():
@@ -63,68 +95,162 @@ class RunCommandNode:
             print(message)
             return (message,)
 
-        # New: validate working_dir early
+        # Expand working_dir (~ and env vars) and validate
+        if working_dir:
+            working_dir = os.path.expandvars(os.path.expanduser(working_dir))
         if working_dir and not os.path.isdir(working_dir):
             message = f"Working directory does not exist: {working_dir}"
             print(message)
             return (message,)
 
-        # New: cross-platform shell selection
+        # Shell selection
         is_windows = os.name == 'nt'
-        line_shell_executable = None if is_windows else '/bin/bash'
-        chain_runner = ['cmd.exe', '/d', '/c'] if is_windows else ['/bin/bash']
-        script_suffix = '.bat' if is_windows else '.sh'
+        shell = (shell or "auto").lower()
+        chosen_shell = ("cmd" if is_windows else "bash") if shell == "auto" else shell
+
+        # Prepare environment
+        env = os.environ.copy()
+        # Prepend PATH
+        if prepend_path and prepend_path.strip():
+            parts = [os.path.expandvars(os.path.expanduser(p.strip())) for p in prepend_path.splitlines() if p.strip()]
+            if parts:
+                env["PATH"] = os.pathsep.join(parts + [env.get("PATH", "")])
+        # Custom ENV vars
+        if env_vars and env_vars.strip():
+            for ln in env_vars.splitlines():
+                if not ln.strip() or ln.strip().startswith('#'):
+                    continue
+                if '=' not in ln:
+                    continue
+                k, v = ln.split('=', 1)
+                k = k.strip()
+                v = os.path.expandvars(v.strip())
+                if k:
+                    env[k] = v
+
+        # Redaction list
+        redactions = [s for s in (redact_patterns.splitlines() if redact_patterns else []) if s.strip()]
+
+        def redact(s: str) -> str:
+            if not s:
+                return s
+            for pat in redactions:
+                s = s.replace(pat, "***")
+            return s
+
+        def clip(s: str) -> str:
+            if s is None:
+                return ""
+            if len(s) > truncate_output:
+                return s[:truncate_output] + "\n... (truncated)\n"
+            return s
 
         lines = command.splitlines()
-        env = os.environ.copy()
         summary = []
         executed_any = False
 
+        # Helper: PowerShell executable resolution (supports Windows PowerShell and pwsh on non-Windows)
+        def resolve_powershell():
+            if is_windows:
+                return "powershell.exe"
+            return shutil.which("pwsh") or shutil.which("powershell")
+
+        # --- Chain mode: write temp script and run once ---
         if chain_commands:
-            # Write all non-comment, non-empty lines to a temp shell/batch script
             commands_to_run = [line for line in lines if line.strip() and not line.strip().startswith('#')]
             if not commands_to_run:
                 output_str += "No commands executed (all lines empty or commented).\n"
                 return (output_str,)
 
+            # Dry-run preview
+            if dry_run:
+                output_str += "DRY RUN (chain):\n" + "\n".join(commands_to_run) + "\n"
+                structured_results.append({
+                    "script": "(dry-run)",
+                    "stdout": "",
+                    "stderr": "",
+                    "exit_code": -998,
+                    "duration_s": 0.0
+                })
+                output_str += "\n--- SUMMARY ---\nShell Script Exit Code: -998 (dry-run)\n"
+                return (json.dumps(structured_results, indent=2),) if structured_output else (output_str,)
+
+            runner = None
+            script_suffix = None
+            header = ""
+            if chosen_shell == "bash":
+                if is_windows:
+                    msg = "Bash shell not available on Windows for chained execution. Choose cmd or powershell."
+                    print(msg)
+                    return (msg,)
+                runner = ["/bin/bash"]
+                script_suffix = ".sh"
+            elif chosen_shell == "cmd":
+                if not is_windows:
+                    msg = "cmd.exe is not available on this platform."
+                    print(msg)
+                    return (msg,)
+                runner = ["cmd.exe", "/d", "/c"]
+                script_suffix = ".bat"
+                header = "@echo off\n"
+            elif chosen_shell == "powershell":
+                ps = resolve_powershell()
+                if not ps:
+                    msg = "PowerShell not found. Install PowerShell (pwsh) or use another shell."
+                    print(msg)
+                    return (msg,)
+                runner = [ps, "-NoProfile"]
+                if is_windows:
+                    runner += ["-ExecutionPolicy", "Bypass"]
+                runner += ["-File"]
+                script_suffix = ".ps1"
+                header = "$ErrorActionPreference = 'Stop'\n"
+            else:
+                msg = f"Unsupported shell: {chosen_shell}"
+                print(msg)
+                return (msg,)
+
             script_path = None
             with tempfile.NamedTemporaryFile('w', delete=False, suffix=script_suffix, encoding='utf-8') as script_file:
                 script_path = script_file.name
-                if is_windows:
-                    script_file.write("@echo off\n")
+                if header:
+                    script_file.write(header)
                 script_file.write('\n'.join(commands_to_run) + '\n')
 
             try:
-                if not is_windows:
+                if not is_windows and chosen_shell == "bash":
                     os.chmod(script_path, 0o700)
-                output_str += f"Executing as shell script: {script_path}\n"
-                print(f"Executing shell script: {script_path}")
+                output_str += f"Executing as script: {script_path}\n"
+                print(f"Executing script: {script_path}")
+                start = time.time()
                 result = subprocess.run(
-                    chain_runner + [script_path],
+                    runner + [script_path],
                     shell=False,
                     check=False,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=(subprocess.STDOUT if merge_stderr else subprocess.PIPE),
                     text=True,
                     cwd=working_dir if working_dir else None,
                     env=env,
                     timeout=timeout
                 )
+                duration = round(time.time() - start, 4)
                 std_out = result.stdout or ""
-                std_err = result.stderr or ""
+                std_err = "" if merge_stderr else (result.stderr or "")
+                std_out = clip(redact(std_out))
+                std_err = clip(redact(std_err))
                 exit_code = result.returncode
-                if len(std_out) > truncate_output:
-                    std_out = std_out[:truncate_output] + "\n... (truncated)\n"
-                if len(std_err) > truncate_output:
-                    std_err = std_err[:truncate_output] + "\n... (truncated)\n"
                 output_str += f"--- STDOUT ---\n{std_out}"
-                output_str += f"--- STDERR ---\n{std_err}"
+                if not merge_stderr:
+                    output_str += f"--- STDERR ---\n{std_err}"
                 output_str += f"--- Exit Code: {exit_code} ---\n"
+                output_str += f"--- Duration: {duration}s ---\n"
                 structured_results.append({
                     "script": script_path,
                     "stdout": std_out,
                     "stderr": std_err,
-                    "exit_code": exit_code
+                    "exit_code": exit_code,
+                    "duration_s": duration
                 })
                 summary.append(f"Shell Script Exit Code: {exit_code}")
             except subprocess.TimeoutExpired:
@@ -135,7 +261,8 @@ class RunCommandNode:
                     "script": script_path or "",
                     "stdout": "",
                     "stderr": msg,
-                    "exit_code": -999
+                    "exit_code": -999,
+                    "duration_s": float(timeout)
                 })
                 summary.append("Shell Script Timeout")
             except Exception as e:
@@ -146,7 +273,8 @@ class RunCommandNode:
                     "script": script_path or "",
                     "stdout": "",
                     "stderr": error_message,
-                    "exit_code": -1
+                    "exit_code": -1,
+                    "duration_s": 0.0
                 })
                 summary.append("Shell Script Exception")
             finally:
@@ -156,11 +284,7 @@ class RunCommandNode:
                 except Exception:
                     pass
             output_str += "\n--- SUMMARY ---\n" + "\n".join(summary) + "\n"
-            if structured_output:
-                import json
-                return (json.dumps(structured_results, indent=2),)
-            else:
-                return (output_str,)
+            return (json.dumps(structured_results, indent=2),) if structured_output else (output_str,)
 
         # --- Individual line mode (default) ---
         for idx, line in enumerate(lines, 1):
@@ -172,40 +296,85 @@ class RunCommandNode:
             executed_any = True
             output_str += f"\n[Line {idx}] Executing: {stripped}\n"
             print(f"Executing line {idx}: {stripped}")
+
+            # Dry-run per line
+            if dry_run:
+                structured_results.append({
+                    "line": idx,
+                    "command": stripped,
+                    "stdout": "",
+                    "stderr": "",
+                    "exit_code": -998,
+                    "duration_s": 0.0
+                })
+                output_str += "--- DRY RUN: Not executed ---\n"
+                summary.append(f"[Line {idx}] Exit Code: -998 (dry-run)")
+                continue
+
             try:
-                # New: platform-aware subprocess invocation
                 run_kwargs = {
-                    "shell": True,
                     "check": False,
                     "stdout": subprocess.PIPE,
-                    "stderr": subprocess.PIPE,
+                    "stderr": (subprocess.STDOUT if merge_stderr else subprocess.PIPE),
                     "text": True,
                     "cwd": working_dir if working_dir else None,
                     "env": env,
                     "timeout": timeout
                 }
-                if not is_windows:
-                    run_kwargs["executable"] = line_shell_executable
 
-                result = subprocess.run(stripped, **run_kwargs)
+                args = None
+                use_shell = False
 
+                if chosen_shell == "bash":
+                    if is_windows:
+                        raise RuntimeError("Bash is not available on Windows for per-line execution. Choose cmd or powershell.")
+                    use_shell = True
+                    run_kwargs["executable"] = "/bin/bash"
+                    args = stripped
+                elif chosen_shell == "cmd":
+                    if not is_windows:
+                        raise RuntimeError("cmd.exe is not available on this platform.")
+                    use_shell = True
+                    args = stripped
+                elif chosen_shell == "powershell":
+                    ps = resolve_powershell()
+                    if not ps:
+                        raise RuntimeError("PowerShell not found. Install PowerShell (pwsh) or use another shell.")
+                    args = [ps, "-NoProfile"]
+                    if is_windows:
+                        args += ["-ExecutionPolicy", "Bypass"]
+                    args += ["-Command", stripped]
+                else:
+                    raise RuntimeError(f"Unsupported shell: {chosen_shell}")
+
+                start = time.time()
+                if use_shell:
+                    run_kwargs["shell"] = True
+                    result = subprocess.run(args, **run_kwargs)
+                else:
+                    run_kwargs["shell"] = False
+                    result = subprocess.run(args, **run_kwargs)
+
+                duration = round(time.time() - start, 4)
                 std_out = result.stdout or ""
-                std_err = result.stderr or ""
+                std_err = "" if merge_stderr else (result.stderr or "")
+                std_out = clip(redact(std_out))
+                std_err = clip(redact(std_err))
                 exit_code = result.returncode
-                # Truncate output if needed
-                if len(std_out) > truncate_output:
-                    std_out = std_out[:truncate_output] + "\n... (truncated)\n"
-                if len(std_err) > truncate_output:
-                    std_err = std_err[:truncate_output] + "\n... (truncated)\n"
+
                 output_str += f"--- STDOUT ---\n{std_out}"
-                output_str += f"--- STDERR ---\n{std_err}"
+                if not merge_stderr:
+                    output_str += f"--- STDERR ---\n{std_err}"
                 output_str += f"--- Exit Code: {exit_code} ---\n"
+                output_str += f"--- Duration: {duration}s ---\n"
+
                 structured_results.append({
                     "line": idx,
                     "command": stripped,
                     "stdout": std_out,
                     "stderr": std_err,
-                    "exit_code": exit_code
+                    "exit_code": exit_code,
+                    "duration_s": duration
                 })
                 summary.append(f"[Line {idx}] Exit Code: {exit_code}")
                 if stop_on_error and exit_code != 0:
@@ -220,7 +389,8 @@ class RunCommandNode:
                     "command": stripped,
                     "stdout": "",
                     "stderr": msg,
-                    "exit_code": -999
+                    "exit_code": -999,
+                    "duration_s": float(timeout)
                 })
                 summary.append(f"[Line {idx}] Timeout")
                 if stop_on_error:
@@ -235,7 +405,8 @@ class RunCommandNode:
                     "command": stripped,
                     "stdout": "",
                     "stderr": error_message,
-                    "exit_code": -1
+                    "exit_code": -1,
+                    "duration_s": 0.0
                 })
                 summary.append(f"[Line {idx}] Exception")
                 if stop_on_error:
@@ -248,7 +419,6 @@ class RunCommandNode:
         output_str += "\n--- SUMMARY ---\n" + "\n".join(summary) + "\n"
 
         if structured_output:
-            import json
             return (json.dumps(structured_results, indent=2),)
         else:
             return (output_str,)
