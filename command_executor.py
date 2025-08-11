@@ -1,5 +1,4 @@
 import subprocess
-import shlex
 import os
 import tempfile
 
@@ -64,26 +63,44 @@ class RunCommandNode:
             print(message)
             return (message,)
 
+        # New: validate working_dir early
+        if working_dir and not os.path.isdir(working_dir):
+            message = f"Working directory does not exist: {working_dir}"
+            print(message)
+            return (message,)
+
+        # New: cross-platform shell selection
+        is_windows = os.name == 'nt'
+        line_shell_executable = None if is_windows else '/bin/bash'
+        chain_runner = ['cmd.exe', '/d', '/c'] if is_windows else ['/bin/bash']
+        script_suffix = '.bat' if is_windows else '.sh'
+
         lines = command.splitlines()
         env = os.environ.copy()
         summary = []
         executed_any = False
 
         if chain_commands:
-            # Write all non-comment, non-empty lines to a temp shell script
+            # Write all non-comment, non-empty lines to a temp shell/batch script
             commands_to_run = [line for line in lines if line.strip() and not line.strip().startswith('#')]
             if not commands_to_run:
                 output_str += "No commands executed (all lines empty or commented).\n"
                 return (output_str,)
-            with tempfile.NamedTemporaryFile('w', delete=False, suffix='.sh') as script_file:
+
+            script_path = None
+            with tempfile.NamedTemporaryFile('w', delete=False, suffix=script_suffix, encoding='utf-8') as script_file:
                 script_path = script_file.name
+                if is_windows:
+                    script_file.write("@echo off\n")
                 script_file.write('\n'.join(commands_to_run) + '\n')
+
             try:
-                os.chmod(script_path, 0o700)
+                if not is_windows:
+                    os.chmod(script_path, 0o700)
                 output_str += f"Executing as shell script: {script_path}\n"
                 print(f"Executing shell script: {script_path}")
                 result = subprocess.run(
-                    ["/bin/bash", script_path],
+                    chain_runner + [script_path],
                     shell=False,
                     check=False,
                     stdout=subprocess.PIPE,
@@ -115,7 +132,7 @@ class RunCommandNode:
                 print(msg)
                 output_str += msg
                 structured_results.append({
-                    "script": script_path,
+                    "script": script_path or "",
                     "stdout": "",
                     "stderr": msg,
                     "exit_code": -999
@@ -126,7 +143,7 @@ class RunCommandNode:
                 print(error_message)
                 output_str += error_message
                 structured_results.append({
-                    "script": script_path,
+                    "script": script_path or "",
                     "stdout": "",
                     "stderr": error_message,
                     "exit_code": -1
@@ -134,7 +151,8 @@ class RunCommandNode:
                 summary.append("Shell Script Exception")
             finally:
                 try:
-                    os.remove(script_path)
+                    if script_path:
+                        os.remove(script_path)
                 except Exception:
                     pass
             output_str += "\n--- SUMMARY ---\n" + "\n".join(summary) + "\n"
@@ -155,18 +173,22 @@ class RunCommandNode:
             output_str += f"\n[Line {idx}] Executing: {stripped}\n"
             print(f"Executing line {idx}: {stripped}")
             try:
-                result = subprocess.run(
-                    stripped,
-                    shell=True,
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    executable='/bin/bash',
-                    cwd=working_dir if working_dir else None,
-                    env=env,
-                    timeout=timeout
-                )
+                # New: platform-aware subprocess invocation
+                run_kwargs = {
+                    "shell": True,
+                    "check": False,
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.PIPE,
+                    "text": True,
+                    "cwd": working_dir if working_dir else None,
+                    "env": env,
+                    "timeout": timeout
+                }
+                if not is_windows:
+                    run_kwargs["executable"] = line_shell_executable
+
+                result = subprocess.run(stripped, **run_kwargs)
+
                 std_out = result.stdout or ""
                 std_err = result.stderr or ""
                 exit_code = result.returncode
