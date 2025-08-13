@@ -33,13 +33,6 @@ class RunCommandNode:
                     "step": 1,
                     "label": "Timeout per command (seconds)"
                 }),
-                "truncate_output": ("INT", {
-                    "default": 2048,
-                    "min": 256,
-                    "max": 16384,
-                    "step": 256,
-                    "label": "Max output chars per command"
-                }),
                 "structured_output": ("BOOLEAN", {
                     "default": False
                 }),
@@ -55,7 +48,7 @@ class RunCommandNode:
     FUNCTION = "execute_command"
     CATEGORY = "⚠️Utils/Execution (DANGEROUS)"
 
-    def execute_command(self, command, working_dir, stop_on_error, timeout, truncate_output, structured_output, chain_commands):
+    def execute_command(self, command, working_dir, stop_on_error, timeout, structured_output, chain_commands):
         output_str = ""
         structured_results = []
         if not command or not command.strip():
@@ -113,10 +106,7 @@ class RunCommandNode:
                 std_out = result.stdout or ""
                 std_err = result.stderr or ""
                 exit_code = result.returncode
-                if len(std_out) > truncate_output:
-                    std_out = std_out[:truncate_output] + "\n... (truncated)\n"
-                if len(std_err) > truncate_output:
-                    std_err = std_err[:truncate_output] + "\n... (truncated)\n"
+                # No truncation: show full stdout/stderr
                 output_str += f"--- STDOUT ---\n{std_out}"
                 output_str += f"--- STDERR ---\n{std_err}"
                 output_str += f"--- Exit Code: {exit_code} ---\n"
@@ -192,11 +182,7 @@ class RunCommandNode:
                 std_out = result.stdout or ""
                 std_err = result.stderr or ""
                 exit_code = result.returncode
-                # Truncate output if needed
-                if len(std_out) > truncate_output:
-                    std_out = std_out[:truncate_output] + "\n... (truncated)\n"
-                if len(std_err) > truncate_output:
-                    std_err = std_err[:truncate_output] + "\n... (truncated)\n"
+                # No truncation: show full stdout/stderr
                 output_str += f"--- STDOUT ---\n{std_out}"
                 output_str += f"--- STDERR ---\n{std_err}"
                 output_str += f"--- Exit Code: {exit_code} ---\n"
