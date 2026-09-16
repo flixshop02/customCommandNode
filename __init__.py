@@ -10,7 +10,7 @@ import os
 # from the actual node implementation file (command_executor.py).
 from .command_executor import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # Register the snippet-library / run-history HTTP routes against ComfyUI's
 # PromptServer. Wrapped in try/except so a failure here (e.g. a very old

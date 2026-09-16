@@ -60,6 +60,10 @@ Outputs: `output` (full transcript, or JSON with `structured_output`) and
   recorded — only actual executions.
 - Live log chunks are also published over ComfyUI's websocket as
   `runcommand.log` events (throttled, available on `node._rcnLiveLog`).
+- **Editor shortcut**: `Ctrl+/` (`Cmd+/` on macOS) toggles `#` line comments
+  for the current line or the selected lines inside the `command` box.
+  Indentation and blank lines are preserved, already-commented lines are left
+  alone in a mixed selection, and native undo (`Ctrl+Z`) still works.
 
 ## HTTP endpoints (used by the frontend extension)
 
@@ -68,7 +72,15 @@ Outputs: `output` (full transcript, or JSON with `structured_output`) and
 - `DELETE /run_command_node/snippets/{id}`
 - `GET  /run_command_node/history?n=20` (clamped to 1–200)
 
-## v2 change list (fixes over the previous overhaul)
+## Change list
+
+### v2.1.0
+- **`Ctrl+/` (`Cmd+/`) line-comment toggle** in the `command` box: comments or
+  uncomments the current line / selected lines, keeps indentation and blank
+  lines intact, and preserves native undo. Logic is in
+  `web/js/comment_toggle.js`, unit-tested by `tests/comment_toggle.test.mjs`.
+
+### v2.0.0 (fixes over the previous overhaul)
 
 1. **Frontend actually loads**: the extension now lives at
    `web/js/run_command_ui.js`, matching `WEB_DIRECTORY = "web"` (previously

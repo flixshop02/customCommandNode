@@ -1,5 +1,6 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { toggleCommentBlock } from "./comment_toggle.js";
 
 // Must match NODE_CLASS_MAPPINGS key in command_executor.py exactly.
 const NODE_TYPE = "RunCommand (DANGEROUS)";
@@ -16,6 +17,94 @@ function markDirty(node) {
     if (typeof node.setDirtyCanvas === "function") {
         node.setDirtyCanvas(true, true);
     }
+}
+
+// --- Ctrl+/ (Cmd+/) line-comment toggle for the command box ---------------
+
+// Multiline STRING widgets expose their DOM <textarea> as `inputEl` (older
+// frontends) or `element` (new frontend DOM widgets, possibly wrapping the
+// textarea), so accept both shapes.
+function getTextareaElement(widget) {
+    if (!widget) return null;
+    for (const el of [widget.inputEl, widget.element]) {
+        if (!el) continue;
+        if (el.tagName && el.tagName.toUpperCase() === "TEXTAREA") return el;
+        if (typeof el.querySelector === "function") {
+            const textarea = el.querySelector("textarea");
+            if (textarea) return textarea;
+        }
+    }
+    return null;
+}
+
+function isCommentToggleKey(event) {
+    if (event.isComposing) return false;
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return false;
+    return event.key === "/" || event.code === "Slash" || event.code === "NumpadDivide";
+}
+
+function applyCommentToggle(el, widget, node) {
+    const result = toggleCommentBlock(
+        el.value ?? "",
+        el.selectionStart ?? 0,
+        el.selectionEnd ?? 0,
+    );
+    if (!result) return;
+
+    el.focus();
+    el.setSelectionRange(result.start, result.end);
+    let applied = false;
+    try {
+        // execCommand keeps the browser's native undo (Ctrl+Z) working and
+        // emits an input event that the widget picks up.
+        applied = document.execCommand(
+            "insertText",
+            false,
+            result.value.slice(result.start, result.end),
+        );
+    } catch (e) {
+        applied = false;
+    }
+    if (!applied) {
+        el.value = result.value;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.setSelectionRange(result.start, result.end);
+    }
+    if (widget && widget.value !== el.value) {
+        // Some DOM/Vue widgets only sync through their value setter.
+        widget.value = el.value;
+        requestAnimationFrame(() => el.setSelectionRange(result.start, result.end));
+    }
+    markDirty(node);
+}
+
+function installCommentToggle(node) {
+    const commandWidget = findWidget(node, "command");
+    if (!commandWidget) return;
+
+    const tryAttach = () => {
+        const el = getTextareaElement(commandWidget);
+        if (!el) return false;
+        if (!el._rcnCommentToggle) {
+            el._rcnCommentToggle = true;
+            el.addEventListener("keydown", (event) => {
+                if (!isCommentToggleKey(event)) return;
+                event.preventDefault();
+                event.stopPropagation();
+                applyCommentToggle(el, commandWidget, node);
+            });
+        }
+        return true;
+    };
+
+    if (tryAttach()) return;
+    // DOM widgets can mount slightly after node creation; retry briefly.
+    let tries = 0;
+    const timer = setInterval(() => {
+        if (tryAttach() || ++tries >= 40) {
+            clearInterval(timer);
+        }
+    }, 250);
 }
 
 function applyArmedVisuals(node) {
@@ -260,6 +349,7 @@ app.registerExtension({
             try {
                 upgradeSnippetWidget(node);
                 addSnippetButtons(node);
+                installCommentToggle(node);
                 fetchSnippets().then((snippets) => refreshSnippetWidget(node, snippets));
             } catch (e) {
                 // Never let UI setup break node creation.
@@ -288,6 +378,7 @@ app.registerExtension({
                 );
             }
             applyArmedVisuals(node);
+            installCommentToggle(node);
             fetchSnippets().then((snippets) => refreshSnippetWidget(node, snippets));
             return r;
         };
