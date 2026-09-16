@@ -1,0 +1,9 @@
+# Recommended (optional) dependency: gives reliable cross-platform
+# process-tree killing — it finds and kills every descendant of a spawned
+# command, not just the immediate child (this is what fixes the
+# "backgrounded child survives timeout/cancel" problem). If it is not
+# installed, the node falls back to POSIX process-group kill
+# (start_new_session + killpg) or Windows `taskkill /T /F`, which cover the
+# common cases but are less thorough in edge cases (e.g. a command that
+# re-parents a grandchild). See _kill_process_tree in command_executor.py.
+psutil>=5.9
